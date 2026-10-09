@@ -453,6 +453,7 @@ const rad = (b) => Math.max(0.015, RK * Math.cbrt(Math.abs(b.m)));
 function addBody(o) {
   const b = { id: nextId++, x: o.x, y: o.y, vx: o.vx || 0, vy: o.vy || 0, m: o.m,
     ci: (o.ci != null && o.ci >= 0) ? (o.ci % 6) : (colorCursor++ % 6), pinned: !!o.pinned,
+    note: Number.isFinite(o.note) ? o.note : null,   // MIDI note; overrides the pitch mapping
     ax: 0, ay: 0, oax: 0, oay: 0, trail: [], drag: false };
   bodies.push(b); return b;
 }
@@ -979,7 +980,7 @@ function serialize() {
   return { v: 1, G: S.G, eps: S.eps, collisions: S.collisions, restitution: S.restitution, substeps: S.substeps,
     t: S.t, frame: S.frame, frameIdx: fi >= 0 ? fi : null, selectIdx: si >= 0 ? si : null, trailLen: S.show.trailLen,
     cam: { x: S.cam.x, y: S.cam.y, scale: S.cam.scale },
-    bodies: bodies.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, m: b.m, c: b.ci, p: b.pinned })) };
+    bodies: bodies.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, m: b.m, c: b.ci, p: b.pinned, n: b.note ?? undefined })) };
 }
 function validScene(sc) {
   if (!sc || typeof sc !== 'object' || !Array.isArray(sc.bodies)) return 'The text has no "bodies" list.';
@@ -996,7 +997,7 @@ function loadScene(sc) {
   if (isFinite(sc.restitution)) S.restitution = clamp(sc.restitution, 0, 1);
   if (isFinite(sc.substeps)) S.substeps = clamp(Math.round(sc.substeps), 1, 64);
   if (isFinite(sc.trailLen)) S.show.trailLen = clamp(sc.trailLen, 50, 4000);
-  for (const o of sc.bodies) addBody({ x: o.x, y: o.y, vx: +o.vx || 0, vy: +o.vy || 0, m: o.m, ci: Number.isInteger(o.c) ? o.c : -1, pinned: !!o.p });
+  for (const o of sc.bodies) addBody({ x: o.x, y: o.y, vx: +o.vx || 0, vy: +o.vy || 0, m: o.m, ci: Number.isInteger(o.c) ? o.c : -1, pinned: !!o.p, note: o.n });
   colorCursor = bodies.length;
   S.frame = ['world', 'com', 'body', 'rot'].includes(sc.frame) ? sc.frame : 'world';
   S.frameBodyId = (sc.frameIdx != null && bodies[sc.frameIdx]) ? bodies[sc.frameIdx].id : null;
@@ -1071,6 +1072,35 @@ const PRESETS = [
     let px = 0, py = 0, M = 0; for (const b of bs) { px += b.m * b.vx; py += b.m * b.vy; M += b.m; }
     for (const b of bs) { b.vx -= px / M; b.vy -= py / M; }
     return { G: 1, eps: 0.05, collisions: 'merge', substeps: 8, trailLen: 300, fitR: 17, bodies: bs };
+  } },
+  { name: 'Für Elise', desc: 'A music box. Every orbit shares one period, so the tune loops.', sound: { style: 'pulse', loud: 'const', inst: 'bell' }, build() {
+    // Kepler's third law: the period depends only on the semi-major axis, so orbits that share it
+    // stay in step forever. Each pitch gets its own eccentricity (higher notes rounder) and every
+    // ellipse has its periapsis on the strike line, where each body plays its note.
+    const SCORE = [   // bars 1-8 in sixteenths; bar 8 ends with the pickup that loops back to bar 1
+      'E5 D#5 E5 B4 D5 C5', 'A4+A2 E3 A3 C4 E4 A4', 'B4+E2 E3 G#3 E4 G#4 B4', 'C5+A2 E3 A3 E4 E5 D#5',
+      'E5 D#5 E5 B4 D5 C5', 'A4+A2 E3 A3 C4 E4 A4', 'B4+E2 E3 G#3 E4 C5 B4', 'A4+A2 E3 A3 - E5 D#5'];
+    const PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+    const midi = (n) => 12 * (+n[n.length - 1] + 1) + PC[n[0]] + (n[1] === '#' ? 1 : 0);
+    const notes = [];
+    SCORE.forEach((bar, bi) => bar.split(' ').forEach((slot, si) => {
+      if (slot !== '-') for (const n of slot.split('+')) notes.push({ step: bi * 6 + si, m: midi(n) });
+    }));
+    const M = 1000, steps = 48, sixteenth = 0.15, T = steps * sixteenth, n = 2 * Math.PI / T;
+    const a = Math.cbrt(M / (n * n)), EMAX = 0.68;
+    const pitches = [...new Set(notes.map((x) => x.m))].sort((p, q) => p - q);
+    const lo = pitches[0], hi = pitches[pitches.length - 1];
+    const bs = [{ x: 0, y: 0, m: M, c: 0, p: true }];
+    for (const { step, m } of notes) {
+      const e = EMAX * (hi - m) / (hi - lo), tau = ((step - 45 + steps) % steps) * sixteenth;  // start just before the pickup
+      let Mn = -n * tau; Mn -= 2 * Math.PI * Math.round(Mn / (2 * Math.PI));
+      let E = Mn; for (let k = 0; k < 30; k++) E -= (E - e * Math.sin(E) - Mn) / (1 - e * Math.cos(E));
+      const nu = 2 * Math.atan2(Math.sqrt(1 + e) * Math.sin(E / 2), Math.sqrt(1 - e) * Math.cos(E / 2));
+      const r = a * (1 - e * Math.cos(E)), vp = Math.sqrt(M / (a * (1 - e * e)));
+      bs.push({ x: r * Math.cos(nu), y: r * Math.sin(nu), vx: -vp * Math.sin(nu), vy: vp * (e + Math.cos(nu)), m: 1e-6, c: pitches.indexOf(m) % 5 + 1, n: m });
+    }
+    return { G: 1, eps: 0.01, collisions: 'none', substeps: 16, trailLen: 600, bodies: bs,
+      cam: { x: -0.35 * a, y: 0, scale: Math.min(W / (2.9 * a), H / (2.2 * a)) } };
   } },
   { name: 'Empty plane', desc: 'Start from nothing and place your own bodies.', build() {
     return { G: 1, eps: 0.05, substeps: 8, trailLen: 800, cam: { x: 0, y: 0, scale: 20 }, bodies: [] };
@@ -1213,7 +1243,10 @@ for (const p of PRESETS) {
   const nm = document.createElement('b'); nm.textContent = p.name;
   const ds = document.createElement('span'); ds.textContent = p.desc;
   b.append(nm, ds);
-  b.addEventListener('click', () => { loadScene(p.build()); S.running = true; syncTransport(); });
+  b.addEventListener('click', () => {
+    loadScene(p.build()); S.running = true; syncTransport();
+    if (p.sound) { Object.assign(SND, p.sound); resetVoices(); setSound(true); }
+  });
   $('presets').appendChild(b);
 }
 // Transport & tools
@@ -1396,6 +1429,7 @@ function loudU(b) {
   return 0.8;
 }
 function freqFor(b) {
+  if (b.note != null) return { f: midiF(b.note), idx: b.note };
   const L = getNotes();
   if (SND.pitch === 'color') {
     const oct = Math.round((1 - massNorm(b.m)) * (SND.octaves - 1));
@@ -1435,9 +1469,9 @@ function chain(pan, send) {
 }
 const panOf = (x, y) => { const p = w2s(x, y); return clamp(p[0] / W * 2 - 1, -1, 1) * 0.85; };
 const oscType = () => SND.inst === 'bell' ? 'sine' : SND.inst === 'pad' ? 'triangle' : 'sawtooth';
-function pluck(f, vel, pan, decay) {
+function pluck(f, vel, pan, decay, delay = 0) {
   if (!AC || activeNotes > 28) return;
-  const t = AC.currentTime + 0.005, ch = chain(pan, 0.45);
+  const t = AC.currentTime + 0.005 + delay, ch = chain(pan, 0.45);
   const att = SND.inst === 'pad' ? 0.06 : SND.inst === 'analog' ? 0.008 : 0.003, amp = 0.3 * clamp(vel, 0.05, 1);
   let dest = ch.g, filt = null;
   if (SND.inst === 'analog') {
@@ -1533,17 +1567,19 @@ function audioUpdate(dt, adv) {
     const fp = w2f(b.x, b.y), nf = freqFor(b);
     let v = VO.get(b.id);
     if (!v || v.px === undefined) { VO.set(b.id, { drone: null, px: fp[0], py: fp[1], idx: nf.idx, t: -1 }); continue; }
-    let trig = false;
+    let trig = false, delay = 0;
     if (adv && !b.drag) {
       if (SND.style === 'pulse') {
         trig = (v.py < 0) !== (fp[1] < 0) && fp[0] > 3 * rad(b) && v.px > 0 &&
                Math.abs(v.py) + Math.abs(fp[1]) > 1e-6 * Math.max(1, fp[0]);
+        // delay by where in the frame the crossing fell, so every strike lags by exactly one frame
+        if (trig) delay = clamp(Math.abs(v.py) / (Math.abs(v.py) + Math.abs(fp[1])), 0, 1) * Math.min(dt, 0.05);
       } else trig = nf.idx !== v.idx;
     }
     v.px = fp[0]; v.py = fp[1]; v.idx = nf.idx;
     if (trig && now - v.t > 0.09) {
       v.t = now;
-      pluck(nf.f, loudU(b), panOf(b.x, b.y), 0.35 + 1.8 * massNorm(b.m));
+      pluck(nf.f, loudU(b), panOf(b.x, b.y), b.note != null ? 1.1 : 0.35 + 1.8 * massNorm(b.m), delay);
       addFlash(b.x, b.y, rad(b), b.ci, true);
     }
   }
